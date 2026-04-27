@@ -45,6 +45,7 @@ dependencies:
   flutter_ble_peripheral: ^2.1.0
   flutter_background_service: ^5.1.0
   flutter_local_notifications: ^21.0.0
+  socket_io_client: ^2.0.3
 
 dev_dependencies:
   flutter_test:

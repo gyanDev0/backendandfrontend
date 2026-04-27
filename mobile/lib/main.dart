@@ -11,10 +11,7 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:vibration/vibration.dart';
 import 'services/api_service.dart';
-import 'services/ble_broadcaster_service.dart';
-import 'package:permission_handler/permission_handler.dart';
-import 'package:flutter_background_service/flutter_background_service.dart';
-import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'services/socket_service.dart';
 import 'dart:ui';
 
 void main() async {
@@ -285,7 +282,7 @@ class _DashboardScreenState extends State<DashboardScreen> with SingleTickerProv
   bool _isMarked = false;
   String? _userId;
   late AnimationController _pulseController;
-  StreamSubscription<DocumentSnapshot>? _attendanceSubscription;
+  StreamSubscription? _socketSubscription;
 
   @override
   void initState() {
@@ -298,21 +295,19 @@ class _DashboardScreenState extends State<DashboardScreen> with SingleTickerProv
   }
 
   Future<void> _initAttendanceListener() async {
-    const storage = FlutterSecureStorage();
-    _userId = await storage.read(key: 'user_id');
-    if (_userId == null) return;
-
-    final today = DateTime.now().toIso8601String().split('T')[0];
-    final docId = '${_userId}_$today';
-
-    _attendanceSubscription = FirebaseFirestore.instance
-        .collection('attendances')
-        .doc(docId)
-        .snapshots()
-        .listen((snapshot) {
-      if (snapshot.exists && !_isMarked) {
+    SocketService().connect();
+    _socketSubscription = SocketService().attendanceStream.listen((data) {
+      if (!_isMarked) {
         setState(() => _isMarked = true);
         _triggerSuccessFeedback();
+        
+        // Show a success dialog or snackbar
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Attendance marked for ${data['name']}!'),
+            backgroundColor: Colors.green,
+          )
+        );
       }
     });
   }
@@ -334,7 +329,7 @@ class _DashboardScreenState extends State<DashboardScreen> with SingleTickerProv
   @override
   void dispose() {
     _pulseController.dispose();
-    _attendanceSubscription?.cancel();
+    _socketSubscription?.cancel();
     BLEBroadcasterService.stopBroadcasting();
     super.dispose();
   }
