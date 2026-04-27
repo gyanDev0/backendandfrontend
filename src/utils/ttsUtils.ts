@@ -1,3 +1,4 @@
+// @ts-ignore
 import gTTS from 'node-gtts';
 import path from 'path';
 import fs from 'fs-extra';
