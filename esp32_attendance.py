@@ -238,13 +238,27 @@ def wifi_connect():
                         time.sleep(1)
                         return True
                     time.sleep(0.5)
-                display("FAILED", "Could not connect", "Check settings", "")
-                time.sleep(2)
+                
+                # If we reach here, connection failed
+                display("CONN FAILED", "Wrong Password?", "BACK to Setup", "OK to Retry")
+                while True:
+                    if btn_back.value() == 0:
+                        wifi_setup_portal()
+                        return False
+                    if btn_ok.value() == 0:
+                        time.sleep(0.2)
+                        return wifi_connect() # Retry
+    else:
+        # No config file found, go straight to setup
+        wifi_setup_portal()
     return False
 
 # --- MAIN ---
 def main():
-    wifi_connect()
+    if not wifi_connect():
+        # If connection failed and user exited portal without saving
+        pass 
+        
     menu = ["Attendance", "WiFi Settings", "Reset ESP"]
     sel = 0
     while True:
