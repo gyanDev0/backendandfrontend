@@ -150,36 +150,112 @@ def attendance_system():
     ble.gap_scan(None)
     ble.active(False)
 
-# --- WIFI & MAIN --- (Simplified for brevity)
+# --- WIFI & PORTAL LOGIC ---
+def wifi_setup_portal():
+    ap = network.WLAN(network.AP_IF)
+    ap.active(True)
+    ap.config(essid='ESP32_ATT_SETUP', password='')
+    
+    s = socket.socket()
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(('', 80))
+    s.listen(1)
+    s.settimeout(0.5)
+    
+    display("PORTAL ACTIVE", "Connect to:", "ESP32_ATT_SETUP", "IP: 192.168.4.1")
+    
+    while True:
+        if btn_back.value() == 0:
+            s.close()
+            ap.active(False)
+            return False
+        try:
+            conn, addr = s.accept()
+            req = conn.recv(1024).decode()
+            if '/save' in req:
+                try:
+                    params = req.split('?')[1].split(' ')[0]
+                    ssid = params.split('&')[0].split('=')[1].replace('+', ' ')
+                    pw = params.split('&')[1].split('=')[1].replace('+', ' ')
+                    with open(CONFIG_FILE, "w") as f:
+                        f.write(ssid + "\n" + pw)
+                    conn.send("HTTP/1.1 200 OK\r\n\r\nSaved! Rebooting...")
+                    conn.close()
+                    s.close()
+                    ap.active(False)
+                    machine.reset()
+                except:
+                    conn.send("HTTP/1.1 400 Bad Request\r\n\r\nInvalid parameters")
+            else:
+                html = """<html><head><meta name='viewport' content='width=device-width, initial-scale=1'>
+                <style>body{font-family:sans-serif;padding:20px}input{width:100%;padding:10px;margin:10px 0}</style></head>
+                <body><h2>ESP32 Setup</h2><form action='/save'>
+                SSID:<br><input name='s' placeholder='WiFi Name'><br>
+                Password:<br><input name='p' type='password'><br>
+                <input type='submit' value='Save & Connect' style='background:#00FFCC;border:none;font-weight:bold'>
+                </form></body></html>"""
+                conn.send("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n" + html)
+            conn.close()
+        except OSError:
+            pass
+
+def wifi_menu():
+    opts = ["Check Status", "Start Portal", "Clear Saved"]
+    sel = 0
+    while True:
+        display("-- WIFI SETS --", opts[0], opts[1], opts[2], sel=sel+1)
+        if btn_up.value() == 0: sel = (sel-1)%len(opts); time.sleep(0.2)
+        if btn_down.value() == 0: sel = (sel+1)%len(opts); time.sleep(0.2)
+        if btn_back.value() == 0: break
+        if btn_ok.value() == 0:
+            time.sleep(0.2)
+            if sel == 0:
+                sta = network.WLAN(network.STA_IF)
+                status = "Connected" if sta.isconnected() else "Disconnected"
+                display("WIFI STATUS", status, "SSID: " + str(sta.config('essid')), "BACK to exit")
+                while btn_back.value() == 1: pass
+            elif sel == 1:
+                wifi_setup_portal()
+            elif sel == 2:
+                try:
+                    os.remove(CONFIG_FILE)
+                    display("CLEARED", "WiFi Settings", "Deleted", "")
+                    time.sleep(1)
+                except: pass
+
 def wifi_connect():
     if CONFIG_FILE in os.listdir():
         with open(CONFIG_FILE) as f:
             lines = f.read().splitlines()
             if len(lines) >= 2:
-                display("CONNECTING...", lines[0], "", "")
+                display("CONNECTING...", lines[0], "Please wait", "")
                 sta = network.WLAN(network.STA_IF)
                 sta.active(True)
                 sta.connect(lines[0], lines[1])
-                for _ in range(20):
-                    if sta.isconnected(): 
-                        display("CONNECTED", "IP:", sta.ifconfig()[0], "")
+                for _ in range(30):
+                    if sta.isconnected():
+                        display("CONNECTED!", "IP:", sta.ifconfig()[0], "")
                         time.sleep(1)
                         return True
                     time.sleep(0.5)
+                display("FAILED", "Could not connect", "Check settings", "")
+                time.sleep(2)
     return False
 
+# --- MAIN ---
 def main():
     wifi_connect()
-    menu = ["Attendance", "Reset ESP"]
+    menu = ["Attendance", "WiFi Settings", "Reset ESP"]
     sel = 0
     while True:
-        display("== SMART ATTEND ==", menu[0], menu[1], "", sel=sel+1)
+        display("== MAIN MENU ==", menu[0], menu[1], menu[2], sel=sel+1)
         if btn_up.value() == 0: sel = (sel-1)%len(menu); time.sleep(0.2)
         if btn_down.value() == 0: sel = (sel+1)%len(menu); time.sleep(0.2)
         if btn_ok.value() == 0:
             time.sleep(0.2)
             if sel == 0: attendance_system()
-            elif sel == 1: machine.reset()
+            elif sel == 1: wifi_menu()
+            elif sel == 2: machine.reset()
 
 if __name__ == "__main__":
     main()
