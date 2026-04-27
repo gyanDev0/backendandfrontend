@@ -1,10 +1,13 @@
 import network, socket, time, machine, os, bluetooth, urequests, gc, binascii, json
-from sh1106 import SH1106_I2C
+import ssd1306
 
 # --- HARDWARE SETUP ---
 # Pins might need adjustment based on user hardware
 i2c = machine.I2C(0, scl=machine.Pin(22), sda=machine.Pin(21))
-oled = SH1106_I2C(128, 64, i2c)
+# Find first device and initialize
+devices = i2c.scan()
+OLED_ADDR = devices[0] if devices else 0x3c
+oled = ssd1306.SSD1306_I2C(128, 64, i2c, addr=OLED_ADDR)
 dac = machine.DAC(machine.Pin(25)) # Internal DAC for audio
 
 # --- BUTTONS ---
