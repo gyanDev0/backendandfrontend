@@ -6,6 +6,7 @@ import path from 'path';
 import fs from 'fs';
 import routes from './routes';
 import dotenv from 'dotenv';
+import { uuidManager } from './utils/uuidManager';
 
 dotenv.config();
 
@@ -62,6 +63,8 @@ io.on('connection', (socket) => {
   });
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, async () => {
   console.log(`Server is running on port ${PORT}`);
+  uuidManager.ioRef = io;
+  await uuidManager.init();
 });

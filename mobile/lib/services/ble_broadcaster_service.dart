@@ -5,105 +5,96 @@ import 'package:flutter_ble_peripheral/flutter_ble_peripheral.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import '../core/encryption_utils.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-import 'package:flutter/foundation.dart';
+import 'package:crypto/crypto.dart';
+import 'api_service.dart';
 
 class BLEBroadcasterService {
   static const _storage = FlutterSecureStorage();
   static bool _isAdvertising = false;
   static final FlutterBlePeripheral _peripheral = FlutterBlePeripheral();
 
-  static bool get isAdvertising => _isAdvertising;
-
-  /// Start the background service which handles BLE advertising
   static Future<void> startBroadcasting() async {
     final service = FlutterBackgroundService();
-    var isRunning = await service.isRunning();
-    if (!isRunning) {
+    if (!(await service.isRunning())) {
       await service.startService();
     }
     _isAdvertising = true;
   }
 
-  /// Stop the background service
   static Future<void> stopBroadcasting() async {
     final service = FlutterBackgroundService();
     service.invoke('stopService');
     _isAdvertising = false;
   }
 
-  /// Entry point for the background isolate
   @pragma('vm:entry-point')
   static void runInBackground(ServiceInstance service) async {
     final storage = const FlutterSecureStorage();
     final peripheral = FlutterBlePeripheral();
-    Timer? timer;
+    int lastTimeSlot = -1;
 
-    final userId = await storage.read(key: 'user_id');
-    final secretKey = await storage.read(key: 'base_secret_key');
+    Future<void> updateAdvertising() async {
+      final currentTimeSlot = EncryptionUtils.getCurrentTimeSlot();
+      if (currentTimeSlot == lastTimeSlot) return;
+      lastTimeSlot = currentTimeSlot;
 
-    if (userId == null || secretKey == null) {
-      service.stopSelf();
-      return;
-    }
+      String? userId = await storage.read(key: 'user_id');
+      String? secretKey = await storage.read(key: 'base_secret_key');
+      if (userId == null || secretKey == null) return;
 
-    Future<void> advertise() async {
       try {
-        final hash = EncryptionUtils.generateRollingHash(
-            userId, secretKey, EncryptionUtils.getCurrentTimeSlot());
+        // Try fetch server source of truth UUID first
+        String? hexHash = await ApiService.fetchCurrentUUID(userId);
 
-        if (await peripheral.isAdvertising) {
-          await peripheral.stop();
+        if (hexHash == null) {
+          // Fallback if offline
+          final data = '$userId$secretKey$currentTimeSlot';
+          final digest = sha256.convert(utf8.encode(data));
+          hexHash = digest.toString().toLowerCase().substring(0, 20);
         }
 
-        // Encode the 10-char rolling hash as raw bytes for Manufacturer Data
-        final Uint8List hashBytes = Uint8List.fromList(utf8.encode(hash));
+        if (await peripheral.isAdvertising) await peripheral.stop();
 
+        // Standardized Service UUID for discovery
+        final String serviceUuid = "0000ff01-0000-1000-8000-00805f9b34fb";
+        
         final AdvertiseData advertiseData = AdvertiseData(
-          // PRIMARY: Manufacturer Data (Android) — Company ID 0x1001 + hash bytes
-          manufacturerId: 0x1001,
-          manufacturerData: hashBytes,
-          // SECONDARY: Local Name — iOS fallback (hash is exactly 10 chars)
-          localName: hash,
+          serviceUuid: serviceUuid,
+          localName: "ATT", // Short name for fallback
+          // Including the hash in Service Data (more reliable than Name)
+          serviceData: Uint8List.fromList(utf8.encode(hexHash)),
           includeDeviceName: false,
-          includePowerLevel: false,
         );
 
         await peripheral.start(advertiseData: advertiseData);
-        
-        if (service is AndroidServiceInstance) {
-          service.setForegroundNotificationInfo(
-            title: "Attendance Broadcaster Active",
-            content: "Broadcasting Hash: $hash",
-          );
-        }
+
+        service.invoke('updateHash', {
+          'hash': hexHash,
+          'userId': userId,
+          'timeSlot': currentTimeSlot,
+        });
+        print('[BLE] Broadcast Active: $hexHash');
       } catch (e) {
-        print('[Background BLE] Error: $e');
+        print('[BLE] Error: $e');
       }
     }
 
-    // Initial broadcast
-    await advertise();
-
-    // Rolling refresh every 30 seconds
-    timer = Timer.periodic(const Duration(seconds: 30), (t) async {
-      await advertise();
-    });
-
+    Timer.periodic(const Duration(seconds: 1), (timer) async => await updateAdvertising());
     service.on('stopService').listen((event) async {
-      timer?.cancel();
-      if (await peripheral.isAdvertising) {
-        await peripheral.stop();
-      }
+      await peripheral.stop();
       service.stopSelf();
     });
+    await updateAdvertising();
   }
 
-  /// Get the current rolling hash (for display in UI)
   static Future<String?> getCurrentHash() async {
     final userId = await _storage.read(key: 'user_id');
     final secretKey = await _storage.read(key: 'base_secret_key');
     if (userId == null || secretKey == null) return null;
-    return EncryptionUtils.generateRollingHash(
-        userId, secretKey, EncryptionUtils.getCurrentTimeSlot());
+    
+    String? hash = await ApiService.fetchCurrentUUID(userId);
+    if (hash != null) return hash;
+    
+    return EncryptionUtils.generateRollingHash(userId, secretKey, EncryptionUtils.getCurrentTimeSlot());
   }
 }

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { register, login } from './controllers/authController';
-import { markAttendance, getHistory } from './controllers/attendanceController';
+import { markAttendance, getHistory, getCurrentUuid } from './controllers/attendanceController';
 import { authMiddleware } from './middleware/auth';
 
 const router = Router();
@@ -14,5 +14,6 @@ router.post('/attendance', markAttendance);
 
 // App Dashboard Routes (Protected)
 router.get('/attendance/history', authMiddleware, getHistory);
+router.get('/attendance/uuid', getCurrentUuid);
 
 export default router;

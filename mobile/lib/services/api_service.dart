@@ -60,4 +60,15 @@ class ApiService {
       throw Exception('Failed to load history: ${response.body}');
     }
   }
+
+  static Future<String?> fetchCurrentUUID(String userId) async {
+    try {
+      final response = await http.get(Uri.parse('$baseUrl/attendance/uuid?userId=$userId')).timeout(const Duration(seconds: 5));
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        return data['uuid'];
+      }
+    } catch (_) { }
+    return null;
+  }
 }

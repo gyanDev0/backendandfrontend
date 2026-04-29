@@ -8,10 +8,14 @@ class EncryptionUtils {
   }
 
   /// Generates the rolling hash ID based on the userId, secret key, and time slot.
+  /// Standardized to Lowercase Hex for cross-platform compatibility.
   static String generateRollingHash(String userId, String baseSecretKey, int timeSlot) {
     final data = '$userId$baseSecretKey$timeSlot';
     final bytes = utf8.encode(data);
     final digest = sha256.convert(bytes);
-    return digest.toString().substring(0, 10).toUpperCase();
+    
+    // Using first 20 characters of the hex string to ensure it fits in BLE packets
+    // while remaining highly secure.
+    return digest.toString().toLowerCase().substring(0, 20);
   }
 }

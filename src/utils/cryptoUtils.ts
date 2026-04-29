@@ -12,7 +12,7 @@ export function getCurrentTimeSlot(): number {
  */
 export function generateRollingHash(userId: string, baseSecretKey: string, timeSlot: number): string {
   const data = `${userId}${baseSecretKey}${timeSlot}`;
-  return crypto.createHash('sha256').update(data).digest('hex').substring(0, 10).toUpperCase();
+  return crypto.createHash('sha256').update(data).digest('hex').toLowerCase().substring(0, 20);
 }
 
 /**

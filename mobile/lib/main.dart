@@ -1,17 +1,17 @@
- import 'dart:async';
+import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
- import 'package:flutter_secure_storage/flutter_secure_storage.dart';
- import 'package:firebase_core/firebase_core.dart';
- import 'package:cloud_firestore/cloud_firestore.dart';
- import 'package:vibration/vibration.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:vibration/vibration.dart';
 import 'services/api_service.dart';
 import 'services/socket_service.dart';
+import 'services/ble_broadcaster_service.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:flutter_background_service/flutter_background_service.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'dart:ui';
 
 void main() async {
@@ -25,7 +25,7 @@ void main() async {
         projectId: "attendance-57c1e",
         storageBucket: "attendance-57c1e.firebasestorage.app",
         messagingSenderId: "615644070796",
-        appId: "1:615644070796:web:1234567890abcdef", // Placeholder, will work for Firestore
+        appId: "1:615644070796:web:1234567890abcdef",
       ),
     );
   } else {
@@ -99,7 +99,7 @@ void onStart(ServiceInstance service) async {
     service.stopSelf();
   });
 
-  // Start the BLE Broadcaster logic within the background isolate
+  // Start the BLE Broadcaster logic
   BLEBroadcasterService.runInBackground(service);
 }
 
@@ -110,6 +110,7 @@ class AttendanceApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Secure BLE Attendance',
+      debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,
         primaryColor: const Color(0xFF00FFCC),
@@ -119,10 +120,6 @@ class AttendanceApp extends StatelessWidget {
           primary: Color(0xFF00FFCC),
           secondary: Color(0xFF7B61FF),
           surface: Color(0xFF151A22),
-        ),
-        textTheme: const TextTheme(
-          displayLarge: TextStyle(fontFamily: 'Inter', fontWeight: FontWeight.bold, color: Colors.white),
-          bodyLarge: TextStyle(fontFamily: 'Inter', color: Colors.white70),
         ),
       ),
       home: const AuthWrapper(),
@@ -149,9 +146,7 @@ class _AuthWrapperState extends State<AuthWrapper> {
   }
 
   Future<void> _checkAuth() async {
-    // Request permissions first
     await _requestPermissions();
-    
     final token = await _storage.read(key: 'jwt_token');
     if (mounted) {
       setState(() {
@@ -163,19 +158,12 @@ class _AuthWrapperState extends State<AuthWrapper> {
 
   Future<void> _requestPermissions() async {
     if (kIsWeb) return;
-
-    Map<Permission, PermissionStatus> statuses = await [
+    await [
       Permission.bluetoothScan,
       Permission.bluetoothConnect,
       Permission.bluetoothAdvertise,
       Permission.location,
     ].request();
-
-    if (kDebugMode) {
-      statuses.forEach((permission, status) {
-        print('${permission.toString()}: ${status.toString()}');
-      });
-    }
   }
 
   @override
@@ -222,45 +210,24 @@ class _LoginScreenState extends State<LoginScreen> {
         child: SingleChildScrollView(
           padding: const EdgeInsets.all(32.0),
           child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               const Icon(Icons.bluetooth_connected, size: 80, color: Color(0xFF00FFCC)),
               const SizedBox(height: 24),
-              const Text('Secure Attendance', style: TextStyle(fontSize: 32, fontWeight: FontWeight.bold, color: Colors.white), textAlign: TextAlign.center),
+              const Text('Secure Attendance', style: TextStyle(fontSize: 32, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 12),
+              const Text('v2.1.0-FIX', style: TextStyle(color: Colors.white24, fontSize: 12)),
               const SizedBox(height: 48),
-              TextField(
-                controller: _userIdController,
-                decoration: const InputDecoration(labelText: 'User ID', border: OutlineInputBorder(), prefixIcon: Icon(Icons.person)),
-                style: const TextStyle(color: Colors.white),
-              ),
+              TextField(controller: _userIdController, decoration: const InputDecoration(labelText: 'User ID', border: OutlineInputBorder())),
               const SizedBox(height: 16),
-              TextField(
-                controller: _passwordController,
-                decoration: const InputDecoration(labelText: 'Password', border: OutlineInputBorder(), prefixIcon: Icon(Icons.lock)),
-                obscureText: true,
-                style: const TextStyle(color: Colors.white),
-              ),
+              TextField(controller: _passwordController, decoration: const InputDecoration(labelText: 'Password', border: OutlineInputBorder()), obscureText: true),
               const SizedBox(height: 32),
               ElevatedButton(
                 onPressed: _isLoading ? null : _login,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF00FFCC),
-                  foregroundColor: Colors.black,
-                  padding: const EdgeInsets.symmetric(vertical: 16),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                ),
-                child: _isLoading 
-                    ? const CircularProgressIndicator(color: Colors.black) 
-                    : const Text('LOGIN', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF00FFCC), foregroundColor: Colors.black, minimumSize: const Size(double.infinity, 50)),
+                child: _isLoading ? const CircularProgressIndicator() : const Text('LOGIN'),
               ),
               const SizedBox(height: 16),
-              TextButton(
-                onPressed: () {
-                  Navigator.of(context).push(MaterialPageRoute(builder: (_) => const RegistrationScreen()));
-                },
-                child: const Text('New user? Register now', style: TextStyle(color: Color(0xFF00FFCC))),
-              ),
+              TextButton(onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const RegistrationScreen())), child: const Text('New user? Register now')),
             ],
           ),
         ),
@@ -277,71 +244,83 @@ class DashboardScreen extends StatefulWidget {
 }
 
 class _DashboardScreenState extends State<DashboardScreen> with SingleTickerProviderStateMixin {
-  // Removed instance because methods are static
   bool _isBroadcasting = false;
   bool _isMarked = false;
-  String? _userId;
+  String? _currentHash;
+  Map<String, dynamic>? _debugData;
   late AnimationController _pulseController;
   StreamSubscription? _socketSubscription;
+  StreamSubscription? _hashSubscription;
+  String _statusMessage = "Ready";
 
   @override
   void initState() {
     super.initState();
-    _pulseController = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 2),
-    )..repeat(reverse: true);
+    _pulseController = AnimationController(vsync: this, duration: const Duration(seconds: 2))..repeat(reverse: true);
     _initAttendanceListener();
+    _initHashListener();
+    _checkServiceStatus();
   }
 
-  Future<void> _initAttendanceListener() async {
+  void _checkServiceStatus() async {
+    final running = await FlutterBackgroundService().isRunning();
+    setState(() {
+      _isBroadcasting = running;
+      if (running) _statusMessage = "Service Running";
+    });
+  }
+
+  void _initHashListener() {
+    _hashSubscription = FlutterBackgroundService().on('updateHash').listen((event) {
+      if (mounted) {
+        setState(() {
+          _currentHash = event?['hash'];
+          _debugData = event;
+          _statusMessage = "Active: ${_currentHash}";
+        });
+      }
+    });
+  }
+
+  void _initAttendanceListener() {
     SocketService().connect();
     _socketSubscription = SocketService().attendanceStream.listen((data) {
       if (!_isMarked) {
-        setState(() => _isMarked = true);
+        setState(() {
+          _isMarked = true;
+          _statusMessage = "Attendance SUCCESS";
+        });
         _triggerSuccessFeedback();
-        
-        // Show a success dialog or snackbar
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Attendance marked for ${data['name']}!'),
-            backgroundColor: Colors.green,
-          )
-        );
       }
     });
   }
 
   void _triggerSuccessFeedback() async {
-    // Vibrate
-    if (await Vibration.hasVibrator() ?? false) {
-      Vibration.vibrate(duration: 500, amplitude: 128);
-    }
-    // Haptic feedback
+    if (await Vibration.hasVibrator() ?? false) Vibration.vibrate(duration: 500);
     HapticFeedback.heavyImpact();
-    
-    // Stop broadcasting automatically once marked
-    if (_isBroadcasting) {
-      _toggleBroadcast();
-    }
-  }
-
-  @override
-  void dispose() {
-    _pulseController.dispose();
-    _socketSubscription?.cancel();
-    BLEBroadcasterService.stopBroadcasting();
-    super.dispose();
+    if (_isBroadcasting) _toggleBroadcast();
   }
 
   void _toggleBroadcast() async {
+    setState(() => _statusMessage = _isBroadcasting ? "Stopping..." : "Starting...");
     if (_isBroadcasting) {
       await BLEBroadcasterService.stopBroadcasting();
     } else {
       await BLEBroadcasterService.startBroadcasting();
     }
+    
+    // Immediate local update so user doesn't wait for timer
+    final localHash = await BLEBroadcasterService.getCurrentHash();
+    
     setState(() {
       _isBroadcasting = !_isBroadcasting;
+      if (!_isBroadcasting) {
+        _currentHash = null;
+        _statusMessage = "Stopped";
+      } else {
+        _currentHash = localHash;
+        _statusMessage = "Awaiting Sync...";
+      }
     });
   }
 
@@ -349,287 +328,173 @@ class _DashboardScreenState extends State<DashboardScreen> with SingleTickerProv
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Dashboard'),
-        backgroundColor: Colors.transparent,
-        elevation: 0,
+        title: const Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Dashboard', style: TextStyle(fontSize: 18)),
+            Text('v2.1.0-FIX', style: TextStyle(fontSize: 10, color: Colors.white24)),
+          ],
+        ),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.history, color: Color(0xFF00FFCC)),
-            tooltip: 'Attendance History',
-            onPressed: () {
-              Navigator.of(context).push(MaterialPageRoute(builder: (_) => const HistoryScreen()));
-            },
-          ),
-          IconButton(
-            icon: const Icon(Icons.logout, color: Colors.white70),
-            onPressed: () async {
-              await const FlutterSecureStorage().deleteAll();
-              await BLEBroadcasterService.stopBroadcasting();
-              if(!mounted) return;
-              Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => const LoginScreen()));
-            },
-          )
+          IconButton(icon: const Icon(Icons.history), onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const HistoryScreen()))),
+          IconButton(icon: const Icon(Icons.logout), onPressed: () async {
+            await const FlutterSecureStorage().deleteAll();
+            await BLEBroadcasterService.stopBroadcasting();
+            Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => const LoginScreen()));
+          }),
         ],
       ),
       body: Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            // --- NEW: Today's Status Card ---
             Container(
-              margin: const EdgeInsets.fromLTRB(32, 0, 32, 48),
-              padding: const EdgeInsets.symmetric(vertical: 24, horizontal: 20),
+              margin: const EdgeInsets.all(32),
+              padding: const EdgeInsets.all(24),
               decoration: BoxDecoration(
-                color: const Color(0xFF151A22),
-                borderRadius: BorderRadius.circular(24),
-                border: Border.all(
-                  color: _isMarked ? Colors.greenAccent.withOpacity(0.3) : Colors.white10,
-                  width: 1.5,
-                ),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withOpacity(0.3),
-                    blurRadius: 20,
-                    offset: const Offset(0, 10),
-                  ),
-                ],
+                color: const Color(0xFF151A22), 
+                borderRadius: BorderRadius.circular(24), 
+                border: Border.all(color: _isMarked ? Colors.greenAccent : Colors.white10),
+                boxShadow: [BoxShadow(color: Colors.black45, blurRadius: 15)],
               ),
               child: Column(
                 children: [
-                  Text(
-                    'TODAY\'S STATUS',
-                    style: TextStyle(
-                      color: Colors.white.withOpacity(0.5),
-                      letterSpacing: 1.5,
-                      fontSize: 12,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(
-                        _isMarked ? Icons.verified_user : Icons.pending_actions,
-                        color: _isMarked ? Colors.greenAccent : Colors.orangeAccent,
-                        size: 28,
-                      ),
-                      const SizedBox(width: 12),
-                      Text(
-                        _isMarked ? 'Attendance Marked' : 'Pending Detection',
-                        style: TextStyle(
-                          fontSize: 20,
-                          fontWeight: FontWeight.bold,
-                          color: _isMarked ? Colors.greenAccent : Colors.orangeAccent,
-                        ),
+                  Text('STATUS: ${_statusMessage.toUpperCase()}', style: const TextStyle(color: Colors.white38, fontWeight: FontWeight.bold, fontSize: 10, letterSpacing: 1.2)),
+                  const SizedBox(height: 20),
+                  if (_isBroadcasting) ...[
+                    if (_currentHash == null) ...[
+                      const CircularProgressIndicator(strokeWidth: 2),
+                      const SizedBox(height: 12),
+                      const Text('Searching for BLE...', style: TextStyle(fontSize: 12, color: Colors.white24)),
+                    ] else ...[
+                      const Text('BROADCASTING UUID', style: TextStyle(color: Color(0xFF00FFCC), fontSize: 11, fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 4),
+                      Text(_currentHash!, style: const TextStyle(fontSize: 32, fontWeight: FontWeight.bold, fontFamily: 'monospace', color: Color(0xFF00FFCC))),
+                      const Divider(color: Colors.white10, height: 32),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceAround,
+                        children: [
+                          _smallDebug('USER', _debugData?['userId'] ?? 'SYNCING'),
+                          _smallDebug('SLOT', _debugData?['timeSlot']?.toString() ?? 'SYNCING'),
+                        ],
                       ),
                     ],
-                  ),
-                  if (_isMarked) ...[
-                    const SizedBox(height: 8),
-                    Text(
-                      'Last updated: ${DateTime.now().hour}:${DateTime.now().minute.toString().padLeft(2, '0')}',
-                      style: TextStyle(color: Colors.white.withOpacity(0.4), fontSize: 13),
-                    ),
-                  ]
+                  ] else ...[
+                    const Icon(Icons.bluetooth_disabled, size: 48, color: Colors.white10),
+                    const SizedBox(height: 12),
+                    const Text('Tap below to start', style: TextStyle(color: Colors.white24)),
+                  ],
+                  const SizedBox(height: 20),
+                  Text(_isMarked ? '✓ ATTENDANCE MARKED' : '• PENDING DETECTION', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: _isMarked ? Colors.greenAccent : Colors.orangeAccent)),
                 ],
               ),
             ),
-
             Stack(
               alignment: Alignment.center,
               children: [
                 if (_isBroadcasting && !_isMarked)
                   ScaleTransition(
-                    scale: Tween(begin: 1.0, end: 1.5).animate(CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut)),
-                    child: Container(
-                      width: 200,
-                      height: 200,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: const Color(0xFF00FFCC).withOpacity(0.2),
-                      ),
-                    ),
+                    scale: Tween(begin: 1.0, end: 1.4).animate(CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut)),
+                    child: Container(width: 180, height: 180, decoration: BoxDecoration(shape: BoxShape.circle, color: const Color(0xFF00FFCC).withOpacity(0.1))),
                   ),
                 GestureDetector(
                   onTap: _isMarked ? null : _toggleBroadcast,
-                  child: Container(
-                    width: 150,
-                    height: 150,
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 300),
+                    width: 140, height: 140,
                     decoration: BoxDecoration(
-                      shape: BoxShape.circle,
+                      shape: BoxShape.circle, 
                       gradient: LinearGradient(
-                        colors: _isMarked
-                          ? [const Color(0xFF1B5E20), const Color(0xFF2E7D32)]
+                        colors: _isMarked 
+                          ? [Colors.green.shade900, Colors.green.shade700] 
                           : _isBroadcasting 
-                            ? [const Color(0xFF00FFCC), const Color(0xFF00B28F)]
-                            : [const Color(0xFF3A4255), const Color(0xFF2A3142)],
+                            ? [const Color(0xFF00FFCC), const Color(0xFF00B28F)] 
+                            : [const Color(0xFF2A3142), const Color(0xFF151A22)],
                         begin: Alignment.topLeft,
                         end: Alignment.bottomRight,
                       ),
                       boxShadow: [
-                        if (_isBroadcasting && !_isMarked)
-                          BoxShadow(
-                            color: const Color(0xFF00FFCC).withOpacity(0.6),
-                            blurRadius: 30,
-                            spreadRadius: 10,
-                          ),
+                        if (_isBroadcasting && !_isMarked) 
+                          BoxShadow(color: const Color(0xFF00FFCC).withOpacity(0.3), blurRadius: 20, spreadRadius: 5)
                       ],
                     ),
-                    child: Icon(
-                      _isMarked ? Icons.check : Icons.bluetooth,
-                      size: 64,
-                      color: (_isBroadcasting || _isMarked) ? Colors.black : Colors.white54,
-                    ),
+                    child: Icon(_isMarked ? Icons.check : Icons.bluetooth, size: 56, color: (_isBroadcasting || _isMarked) ? Colors.black : Colors.white38),
                   ),
                 ),
               ],
             ),
-            const SizedBox(height: 48),
-            if (_isMarked)
-              Container(
-                margin: const EdgeInsets.symmetric(horizontal: 32),
-                padding: const EdgeInsets.all(20),
-                decoration: BoxDecoration(
-                  color: Colors.green.withOpacity(0.15),
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(color: Colors.greenAccent.withOpacity(0.5), width: 2),
-                ),
-                child: Row(
-                  children: [
-                    const Icon(Icons.check_circle, color: Colors.greenAccent, size: 32),
-                    const SizedBox(width: 16),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text(
-                            'Attendance Marked!',
-                            style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 18),
-                          ),
-                          Text(
-                            'Successfully recorded at ${DateTime.now().hour}:${DateTime.now().minute.toString().padLeft(2, '0')}',
-                            style: TextStyle(color: Colors.white.withOpacity(0.7), fontSize: 14),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              )
-            else ...[
-              Text(
-                _isBroadcasting ? 'Broadcasting Secure ID...' : 'Tap to Broadcast',
-                style: TextStyle(
-                  fontSize: 22,
-                  fontWeight: FontWeight.bold,
-                  color: _isBroadcasting ? const Color(0xFF00FFCC) : Colors.white,
-                ),
-              ),
-              const SizedBox(height: 16),
-              const Padding(
-                padding: EdgeInsets.symmetric(horizontal: 40.0),
-                child: Text(
-                  'Your dynamic ID refreshes every 30 seconds. Keep your device near the ESP32 scanner.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(color: Colors.white54, height: 1.5),
-                ),
-              ),
-            ],
           ],
         ),
       ),
     );
   }
+
+  Widget _smallDebug(String title, String val) {
+    return Column(
+      children: [
+        Text(title, style: const TextStyle(fontSize: 8, color: Colors.white38, fontWeight: FontWeight.bold)),
+        Text(val, style: const TextStyle(fontSize: 10, color: Colors.white70, fontFamily: 'monospace')),
+      ],
+    );
+  }
+
+  @override
+  void dispose() {
+    _pulseController.dispose();
+    _socketSubscription?.cancel();
+    _hashSubscription?.cancel();
+    super.dispose();
+  }
 }
+
 class RegistrationScreen extends StatefulWidget {
   const RegistrationScreen({super.key});
-
   @override
   State<RegistrationScreen> createState() => _RegistrationScreenState();
 }
 
 class _RegistrationScreenState extends State<RegistrationScreen> {
   final _nameController = TextEditingController();
-  final _institutionController = TextEditingController();
-  final _userIdController = TextEditingController();
-  final _passwordController = TextEditingController();
-  final _apiService = ApiService();
+  final _instController = TextEditingController();
+  final _userController = TextEditingController();
+  final _passController = TextEditingController();
+  final _api = ApiService();
   bool _isLoading = false;
-
-  Future<void> _register() async {
-    setState(() => _isLoading = true);
-    try {
-      final res = await _apiService.register(
-        _nameController.text,
-        _institutionController.text,
-        _userIdController.text,
-        _passwordController.text,
-      );
-      if (res['message'] != null) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Registration successful! Please login.')));
-        Navigator.of(context).pop();
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Registration failed: ${res['error']}')));
-      }
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
-    } finally {
-      if (mounted) setState(() => _isLoading = false);
-    }
-  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('Register')),
-      body: Center(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(32.0),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              TextField(
-                controller: _nameController,
-                decoration: const InputDecoration(labelText: 'Full Name', border: OutlineInputBorder(), prefixIcon: Icon(Icons.person_outline)),
-                style: const TextStyle(color: Colors.white),
-              ),
-              const SizedBox(height: 16),
-              TextField(
-                controller: _institutionController,
-                decoration: const InputDecoration(labelText: 'Institution Code', border: OutlineInputBorder(), prefixIcon: Icon(Icons.school)),
-                style: const TextStyle(color: Colors.white),
-              ),
-              const SizedBox(height: 16),
-              TextField(
-                controller: _userIdController,
-                decoration: const InputDecoration(labelText: 'User ID', border: OutlineInputBorder(), prefixIcon: Icon(Icons.fingerprint)),
-                style: const TextStyle(color: Colors.white),
-              ),
-              const SizedBox(height: 16),
-              TextField(
-                controller: _passwordController,
-                decoration: const InputDecoration(labelText: 'Password', border: OutlineInputBorder(), prefixIcon: Icon(Icons.lock_outline)),
-                obscureText: true,
-                style: const TextStyle(color: Colors.white),
-              ),
-              const SizedBox(height: 32),
-              ElevatedButton(
-                onPressed: _isLoading ? null : _register,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF00FFCC),
-                  foregroundColor: Colors.black,
-                  padding: const EdgeInsets.symmetric(vertical: 16),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                ),
-                child: _isLoading 
-                    ? const CircularProgressIndicator(color: Colors.black) 
-                    : const Text('REGISTER', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-              ),
-            ],
-          ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          children: [
+            TextField(controller: _nameController, decoration: const InputDecoration(labelText: 'Full Name', border: OutlineInputBorder())),
+            const SizedBox(height: 12),
+            TextField(controller: _instController, decoration: const InputDecoration(labelText: 'Institution Code', border: OutlineInputBorder())),
+            const SizedBox(height: 12),
+            TextField(controller: _userController, decoration: const InputDecoration(labelText: 'User ID', border: OutlineInputBorder())),
+            const SizedBox(height: 12),
+            TextField(controller: _passController, decoration: const InputDecoration(labelText: 'Password', border: OutlineInputBorder()), obscureText: true),
+            const SizedBox(height: 32),
+            ElevatedButton(
+              onPressed: _isLoading ? null : () async {
+                setState(() => _isLoading = true);
+                try {
+                   await _api.register(_nameController.text, _instController.text, _userController.text, _passController.text);
+                   if (!mounted) return;
+                   ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Success! Please Login.')));
+                   Navigator.pop(context);
+                } catch (e) {
+                   ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+                } finally {
+                   if (mounted) setState(() => _isLoading = false);
+                }
+              }, 
+              child: _isLoading ? const CircularProgressIndicator() : const Text('REGISTER'),
+              style: ElevatedButton.styleFrom(minimumSize: const Size(double.infinity, 50)),
+            ),
+          ],
         ),
       ),
     );
@@ -638,103 +503,40 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
 
 class HistoryScreen extends StatefulWidget {
   const HistoryScreen({super.key});
-
   @override
   State<HistoryScreen> createState() => _HistoryScreenState();
 }
 
 class _HistoryScreenState extends State<HistoryScreen> {
-  final _apiService = ApiService();
-  bool _isLoading = true;
-  List<dynamic> _history = [];
-  String? _error;
-
+  final _api = ApiService();
+  List _history = [];
+  bool _loading = true;
   @override
-  void initState() {
-    super.initState();
-    _fetchHistory();
-  }
-
-  Future<void> _fetchHistory() async {
+  void initState() { super.initState(); _fetch(); }
+  void _fetch() async { 
     try {
-      final history = await _apiService.getHistory();
-      if (mounted) {
-        setState(() {
-          _history = history;
-          _isLoading = false;
-        });
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _error = e.toString();
-          _isLoading = false;
-        });
-      }
+      final h = await _api.getHistory();
+      if (mounted) setState(() { _history = h; _loading = false; }); 
+    } catch(e) {
+      if (mounted) setState(() { _loading = false; });
     }
   }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Attendance History'),
-        backgroundColor: Colors.transparent,
-        elevation: 0,
-      ),
-      body: _isLoading
-          ? const Center(child: CircularProgressIndicator(color: Color(0xFF00FFCC)))
-          : _error != null
-              ? Center(child: Text('Error: $_error', style: const TextStyle(color: Colors.redAccent)))
-              : _history.isEmpty
-                  ? Center(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Icon(Icons.history, size: 64, color: Colors.white.withOpacity(0.2)),
-                          const SizedBox(height: 16),
-                          const Text('No records found yet', style: TextStyle(color: Colors.white54)),
-                        ],
-                      ),
-                    )
-                  : RefreshIndicator(
-                      onRefresh: _fetchHistory,
-                      color: const Color(0xFF00FFCC),
-                      child: ListView.builder(
-                        padding: const EdgeInsets.all(16),
-                        itemCount: _history.length,
-                        itemBuilder: (context, index) {
-                          final item = _history[index];
-                          return Container(
-                            margin: const EdgeInsets.only(bottom: 12),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFF151A22),
-                              borderRadius: BorderRadius.circular(16),
-                              border: Border.all(color: Colors.white10),
-                            ),
-                            child: ListTile(
-                              leading: Container(
-                                padding: const EdgeInsets.all(8),
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFF00FFCC).withOpacity(0.1),
-                                  shape: BoxShape.circle,
-                                ),
-                                child: const Icon(Icons.calendar_today, color: Color(0xFF00FFCC), size: 20),
-                              ),
-                              title: Text(
-                                item['date'] ?? 'Unknown Date',
-                                style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.white),
-                              ),
-                              subtitle: Text(
-                                'Time: ${item['time'] ?? '--:--:--'}',
-                                style: TextStyle(color: Colors.white.withOpacity(0.5)),
-                              ),
-                              trailing: const Icon(Icons.check_circle, color: Colors.greenAccent),
-                            ),
-                          );
-                        },
-                      ),
-                    ),
+      appBar: AppBar(title: const Text('History')),
+      body: _loading 
+        ? const Center(child: CircularProgressIndicator())
+        : _history.isEmpty 
+          ? const Center(child: Text('No history found'))
+          : ListView.builder(
+              itemCount: _history.length,
+              itemBuilder: (c, i) => ListTile(
+                leading: const Icon(Icons.check_circle, color: Colors.greenAccent),
+                title: Text(_history[i]['date'] ?? 'N/A'),
+                subtitle: Text(_history[i]['time'] ?? 'N/A'),
+              ),
+            ),
     );
   }
 }

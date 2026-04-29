@@ -1,275 +1,117 @@
-import network, socket, time, machine, os, bluetooth, urequests, gc, binascii, json
-import ssd1306
-
-# --- HARDWARE SETUP ---
-# Pins might need adjustment based on user hardware
-i2c = machine.I2C(0, scl=machine.Pin(22), sda=machine.Pin(21))
-# Find first device and initialize
-devices = i2c.scan()
-OLED_ADDR = devices[0] if devices else 0x3c
-oled = ssd1306.SSD1306_I2C(128, 64, i2c, addr=OLED_ADDR)
-dac = machine.DAC(machine.Pin(25)) # Internal DAC for audio
-
-# --- BUTTONS ---
-btn_up   = machine.Pin(27, machine.Pin.IN, machine.Pin.PULL_UP)
-btn_down = machine.Pin(14, machine.Pin.IN, machine.Pin.PULL_UP)
-btn_back = machine.Pin(12, machine.Pin.IN, machine.Pin.PULL_UP)
-btn_ok   = machine.Pin(13, machine.Pin.IN, machine.Pin.PULL_UP)
+import network, socket, time, machine, os, bluetooth, urequests, gc, json, binascii
 
 # --- CONFIG ---
-# Replace with your actual server URL or IP
 SERVER_URL = "https://ble-attendance-backend-ktik.onrender.com"
 DEVICE_ID = "esp32_01"
 CONFIG_FILE = "wifi.dat"
 
-ble = bluetooth.BLE()
-# Cache for seen UUIDs to prevent rapid re-scans (cleared every 1 minute)
-seen_uuids = {} 
+# --- HARDWARE ---
+i2c = machine.I2C(0, scl=machine.Pin(22), sda=machine.Pin(21))
+import ssd1306
+oled = ssd1306.SSD1306_I2C(128, 64, i2c)
+btn_ok = machine.Pin(13, machine.Pin.IN, machine.Pin.PULL_UP)
 
-def display(l1="", l2="", l3="", l4="", sel=-1):
+def display(l1="", l2="", l3="", l4=""):
     oled.fill(0)
-    lines = [l1, l2, l3, l4]
-    for i, line in enumerate(lines):
-        prefix = "> " if sel == i else "  "
-        oled.text(prefix + str(line)[:18], 0, i*16)
+    oled.text(str(l1)[:18], 0, 0); oled.text(str(l2)[:18], 0, 16)
+    oled.text(str(l3)[:18], 0, 32); oled.text(str(l4)[:18], 0, 48)
     oled.show()
 
-# --- ADV DATA PARSER ---
-def parse_adv_data(adv_data):
-    res = {"uuid": None, "name": "Unknown"}
+# Setup DAC on generic Pin 25
+dac = machine.DAC(machine.Pin(25))
+
+# --- OPTIMIZED PARSER: HUNT FOR SERVICE DATA (0x16) FOR UUID 0xFF01 ---
+def parse_attendance_data(adv_data):
     i = 0
     while i < len(adv_data):
         try:
             length = adv_data[i]
             if length == 0: break
             type_code = adv_data[i+1]
-            # 0xFF is Manufacturer Data
-            if type_code == 0xFF:
-                # Assuming company ID (2 bytes) + hash
-                res["uuid"] = binascii.hexlify(adv_data[i+4:i+1+length]).decode()
-            elif type_code == 0x09: # Complete Local Name
-                res["name"] = adv_data[i+2:i+1+length].decode('utf-8')
+            
+            # 0x16 = Service Data (16-bit UUID)
+            if type_code == 0x16:
+                # Payload: [UUID 2 bytes][Rolling Hash...]
+                payload = adv_data[i+2:i+1+length]
+                # Check for our ID: 0xFF01 (Stored as \x01\xff in Little Endian)
+                if payload[0:2] == b'\x01\xff':
+                    return payload[2:].decode('utf-8')
             i += length + 1
         except: break
-    return res
+    return None
 
-# --- ATTENDANCE SYSTEM ---
-def play_audio_data(data):
-    # Simple WAV playback (skipping header)
+def mark_attendance(uid):
+    display("VERIFYING...", uid[:15], "Please wait")
     try:
-        # Start after header (approx 44 bytes for standard WAV)
-        for i in range(44, len(data)):
-            dac.write(data[i])
-            # Delay to match sample rate (approx 8000Hz or 16000Hz)
-            # 1/16000 = 62.5us, 1/8000 = 125us
-            time.sleep_us(100) 
-        dac.write(0) # Reset DAC
-    except Exception as e:
-        print("Audio play error:", e)
-
-def check_server_and_play(uid):
-    # Check local cache first
-    now = time.time()
-    if uid in seen_uuids and (now - seen_uuids[uid]) < 30:
-        return
-
-    ble.gap_scan(None) # Stop scan during processing
-    display("VERIFYING...", "UUID: " + uid[:10], "", "")
-    
-    try:
-        url = SERVER_URL + "/api/attendance/scan"
-        payload = json.dumps({"uuid": uid, "device_id": DEVICE_ID})
-        headers = {'Content-Type': 'application/json'}
-        
-        print("Sending to server:", url)
-        res = urequests.post(url, data=payload, headers=headers, timeout=10)
+        print(">>> DISCOVERED PHONE! UUID:", uid)
+        url = SERVER_URL + "/api/attendance"
+        res = urequests.post(url, json={"uuid": uid, "device_id": DEVICE_ID}, stream=True, timeout=10)
         
         if res.status_code == 200:
-            data = res.json()
-            res.close()
+            name = res.headers.get("X-User-Name", "User")
+            display("SUCCESS!", "Welcome", name)
+            print("Access granted to:", name)
             
-            name = data.get("name", "Unknown")
-            audio_url = data.get("audio_url")
-            
-            display("SUCCESS!", "Welcome", name, "")
-            
-            if audio_url:
-                print("Downloading audio:", audio_url)
-                aud_res = urequests.get(audio_url, timeout=15)
-                if aud_res.status_code == 200:
-                    content = aud_res.content
-                    display("PLAYING AUDIO", name, "", "")
-                    play_audio_data(content)
-                aud_res.close()
-            
-            seen_uuids[uid] = now # Add to cache
-            time.sleep(2)
+            # Skip WAV header (approx 44 bytes) safely
+            try:
+                res.raw.read(44)
+                while True:
+                    chunk = res.raw.read(256)
+                    if not chunk: break
+                    for b in chunk:
+                        dac.write(b)
+                        time.sleep_us(85) # slightly faster than 90us to account for loop overhead
+            except Exception as e:
+                print("Audio play error:", e)
         else:
-            print("Server Error:", res.status_code, res.text)
-            display("INVALID ID", "Not Authorized", "Try Again", "")
-            res.close()
-            time.sleep(2)
-            
+            display("INVALID", "Error: " + str(res.status_code))
+            print("Access denied. Code:", res.status_code)
+        res.close()
     except Exception as e:
-        print("Request Failed:", e)
-        display("SERVER ERROR", "Check Connection", str(e)[:18], "")
-        time.sleep(2)
-    
-    gc.collect()
-    display("ATTENDANCE ON", "Ready to Scan", "", "BACK to exit")
-    ble.gap_scan(0, 30000, 30000, False)
+        display("SERVER ERROR", "Check WiFi")
+        print("Request failed:", e)
+    time.sleep(2)
 
-def attendance_system():
-    if not network.WLAN(network.STA_IF).isconnected():
-        display("WIFI ERROR", "Not Connected", "Setup WiFi first", "BACK to exit")
-        while btn_back.value() == 1: pass
-        return
-        
-    display("ATTENDANCE ON", "Ready to Scan", "", "BACK to exit")
-    seen_uuids.clear()
-    ble.active(True)
+def start_scanning():
+    ble = bluetooth.BLE(); ble.active(True)
+    seen = {}
+    print("--- ATTENDANCE SCANNER V3 (SERVICE UUID) ---")
+    display("SYSTEM READY", "Scanning for app")
     
-    def ble_irq(event, data):
-        if event == 5: # _IRQ_SCAN_RESULT
+    def irq(event, data):
+        if event == 5:
             addr_type, addr, adv_type, rssi, adv_data = data
-            info = parse_adv_data(adv_data)
-            if info["uuid"]:
-                check_server_and_play(info["uuid"])
+            uid = parse_attendance_data(adv_data)
+            if uid:
+                now = time.time()
+                if uid not in seen or (now - seen[uid]) > 30:
+                    mark_attendance(uid)
+                    seen[uid] = now
+                    display("SYSTEM READY", "Scanning for app")
 
-    ble.irq(ble_irq)
-    ble.gap_scan(0, 30000, 30000, False)
-    
-    while btn_back.value() == 1:
-        # Clear cache older than 1 minute to allow re-marking if the user comes back
-        now = time.time()
-        for uid in list(seen_uuids.keys()):
-            if now - seen_uuids[uid] > 60:
-                del seen_uuids[uid]
-        time.sleep(1)
-        
-    ble.gap_scan(None)
-    ble.active(False)
-
-# --- WIFI & PORTAL LOGIC ---
-def wifi_setup_portal():
-    ap = network.WLAN(network.AP_IF)
-    ap.active(True)
-    ap.config(essid='ESP32_ATT_SETUP', password='')
-    
-    s = socket.socket()
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind(('', 80))
-    s.listen(1)
-    s.settimeout(0.5)
-    
-    display("PORTAL ACTIVE", "Connect to:", "ESP32_ATT_SETUP", "IP: 192.168.4.1")
-    
-    while True:
-        if btn_back.value() == 0:
-            s.close()
-            ap.active(False)
-            return False
-        try:
-            conn, addr = s.accept()
-            req = conn.recv(1024).decode()
-            if '/save' in req:
-                try:
-                    params = req.split('?')[1].split(' ')[0]
-                    ssid = params.split('&')[0].split('=')[1].replace('+', ' ')
-                    pw = params.split('&')[1].split('=')[1].replace('+', ' ')
-                    with open(CONFIG_FILE, "w") as f:
-                        f.write(ssid + "\n" + pw)
-                    conn.send("HTTP/1.1 200 OK\r\n\r\nSaved! Rebooting...")
-                    conn.close()
-                    s.close()
-                    ap.active(False)
-                    machine.reset()
-                except:
-                    conn.send("HTTP/1.1 400 Bad Request\r\n\r\nInvalid parameters")
-            else:
-                html = """<html><head><meta name='viewport' content='width=device-width, initial-scale=1'>
-                <style>body{font-family:sans-serif;padding:20px}input{width:100%;padding:10px;margin:10px 0}</style></head>
-                <body><h2>ESP32 Setup</h2><form action='/save'>
-                SSID:<br><input name='s' placeholder='WiFi Name'><br>
-                Password:<br><input name='p' type='password'><br>
-                <input type='submit' value='Save & Connect' style='background:#00FFCC;border:none;font-weight:bold'>
-                </form></body></html>"""
-                conn.send("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n" + html)
-            conn.close()
-        except OSError:
-            pass
-
-def wifi_menu():
-    opts = ["Check Status", "Start Portal", "Clear Saved"]
-    sel = 0
-    while True:
-        display("-- WIFI SETS --", opts[0], opts[1], opts[2], sel=sel+1)
-        if btn_up.value() == 0: sel = (sel-1)%len(opts); time.sleep(0.2)
-        if btn_down.value() == 0: sel = (sel+1)%len(opts); time.sleep(0.2)
-        if btn_back.value() == 0: break
-        if btn_ok.value() == 0:
-            time.sleep(0.2)
-            if sel == 0:
-                sta = network.WLAN(network.STA_IF)
-                status = "Connected" if sta.isconnected() else "Disconnected"
-                display("WIFI STATUS", status, "SSID: " + str(sta.config('essid')), "BACK to exit")
-                while btn_back.value() == 1: pass
-            elif sel == 1:
-                wifi_setup_portal()
-            elif sel == 2:
-                try:
-                    os.remove(CONFIG_FILE)
-                    display("CLEARED", "WiFi Settings", "Deleted", "")
-                    time.sleep(1)
-                except: pass
+    ble.irq(irq)
+    # Active scan, 100ms interval, 50ms window
+    ble.gap_scan(0, 100000, 50000, True)
+    while True: time.sleep(1)
 
 def wifi_connect():
+    sta = network.WLAN(network.STA_IF); sta.active(True)
     if CONFIG_FILE in os.listdir():
         with open(CONFIG_FILE) as f:
             lines = f.read().splitlines()
-            if len(lines) >= 2:
-                display("CONNECTING...", lines[0], "Please wait", "")
-                sta = network.WLAN(network.STA_IF)
-                sta.active(True)
-                sta.connect(lines[0], lines[1])
-                for _ in range(30):
-                    if sta.isconnected():
-                        display("CONNECTED!", "IP:", sta.ifconfig()[0], "")
-                        time.sleep(1)
-                        return True
-                    time.sleep(0.5)
-                
-                # If we reach here, connection failed
-                display("CONN FAILED", "Wrong Password?", "BACK to Setup", "OK to Retry")
-                while True:
-                    if btn_back.value() == 0:
-                        wifi_setup_portal()
-                        return False
-                    if btn_ok.value() == 0:
-                        time.sleep(0.2)
-                        return wifi_connect() # Retry
-    else:
-        # No config file found, go straight to setup
-        wifi_setup_portal()
+            display("WIFI...", lines[0])
+            sta.connect(lines[0], lines[1])
+            for _ in range(20):
+                if sta.isconnected(): return True
+                time.sleep(0.5)
     return False
 
 # --- MAIN ---
-def main():
-    if not wifi_connect():
-        # If connection failed and user exited portal without saving
-        pass 
-        
-    menu = ["Attendance", "WiFi Settings", "Reset ESP"]
-    sel = 0
-    while True:
-        display("== MAIN MENU ==", menu[0], menu[1], menu[2], sel=sel+1)
-        if btn_up.value() == 0: sel = (sel-1)%len(menu); time.sleep(0.2)
-        if btn_down.value() == 0: sel = (sel+1)%len(menu); time.sleep(0.2)
-        if btn_ok.value() == 0:
-            time.sleep(0.2)
-            if sel == 0: attendance_system()
-            elif sel == 1: wifi_menu()
-            elif sel == 2: machine.reset()
+print("System V3 Started.")
+display("ATTENDANCE SYSTEM", "Press OK to Start")
+while btn_ok.value() == 1: time.sleep(0.1)
 
-if __name__ == "__main__":
-    main()
+if wifi_connect():
+    start_scanning()
+else:
+    display("WIFI ERROR", "Reboot to try")
